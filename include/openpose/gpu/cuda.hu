@@ -70,38 +70,39 @@ namespace op
 
     // Max/min functions
     template<class T>
-    inline __device__ T fastMaxCuda(T a, T b)
+    inline __device__ T fastMaxCuda(const T a, const T b)
     {
         return (a > b ? a : b);
     }
 
     template<class T>
-    inline __device__ T fastMinCuda(T a, T b)
+    inline __device__ T fastMinCuda(const T a, const T b)
     {
         return (a < b ? a : b);
     }
 
     template<class T>
-    inline __device__ T fastTruncateCuda(T value, T min = 0, T max = 1)
+    inline __device__ T fastTruncateCuda(const T value, const T min = 0, const T max = 1)
     {
         return fastMinCuda(max, fastMaxCuda(min, value));
     }
 
     // Cubic interpolation
     template <typename T>
-    inline __device__ void cubicSequentialData(int* xIntArray, int* yIntArray, T& dx, T& dy, const T xSource, const T ySource,
-                                               const int width, const int height)
+    inline __device__ void cubicSequentialData(
+        int* xIntArray, int* yIntArray, T& dx, T& dy, const T xSource, const T ySource, const int widthSource,
+        const int heightSource)
     {
-        xIntArray[1] = fastTruncateCuda(int(xSource + 1e-5), 0, width - 1);
+        xIntArray[1] = fastTruncateCuda(int(floor(xSource)), 0, widthSource - 1);
         xIntArray[0] = fastMaxCuda(0, xIntArray[1] - 1);
-        xIntArray[2] = fastMinCuda(width - 1, xIntArray[1] + 1);
-        xIntArray[3] = fastMinCuda(width - 1, xIntArray[2] + 1);
+        xIntArray[2] = fastMinCuda(widthSource - 1, xIntArray[1] + 1);
+        xIntArray[3] = fastMinCuda(widthSource - 1, xIntArray[2] + 1);
         dx = xSource - xIntArray[1];
 
-        yIntArray[1] = fastTruncateCuda(int(ySource + 1e-5), 0, height - 1);
+        yIntArray[1] = fastTruncateCuda(int(floor(ySource)), 0, heightSource - 1);
         yIntArray[0] = fastMaxCuda(0, yIntArray[1] - 1);
-        yIntArray[2] = fastMinCuda(height - 1, yIntArray[1] + 1);
-        yIntArray[3] = fastMinCuda(height - 1, yIntArray[2] + 1);
+        yIntArray[2] = fastMinCuda(heightSource - 1, yIntArray[1] + 1);
+        yIntArray[3] = fastMinCuda(heightSource - 1, yIntArray[2] + 1);
         dy = ySource - yIntArray[1];
     }
 
@@ -121,8 +122,9 @@ namespace op
     }
 
     template <typename T>
-    inline __device__ T bicubicInterpolate(const T* const sourcePtr, const T xSource, const T ySource, const int widthSource,
-                                           const int heightSource, const int widthSourcePtr)
+    inline __device__ T bicubicInterpolate(
+        const T* const sourcePtr, const T xSource, const T ySource, const int widthSource, const int heightSource,
+        const int widthSourcePtr)
     {
         int xIntArray[4];
         int yIntArray[4];
@@ -134,8 +136,51 @@ namespace op
         for (unsigned char i = 0; i < 4; i++)
         {
             const auto offset = yIntArray[i]*widthSourcePtr;
-            temp[i] = cubicInterpolate(sourcePtr[offset + xIntArray[0]], sourcePtr[offset + xIntArray[1]],
-                                       sourcePtr[offset + xIntArray[2]], sourcePtr[offset + xIntArray[3]], dx);
+            temp[i] = cubicInterpolate(
+                sourcePtr[offset + xIntArray[0]], sourcePtr[offset + xIntArray[1]], sourcePtr[offset + xIntArray[2]],
+                sourcePtr[offset + xIntArray[3]], dx);
+        }
+        return cubicInterpolate(temp[0], temp[1], temp[2], temp[3], dy);
+    }
+
+    template <typename T>
+    inline __device__ T bicubicInterpolate(
+        const unsigned char* const sourcePtr, const T xSource, const T ySource, const int widthSource,
+        const int heightSource, const int widthSourcePtr)
+    {
+        int xIntArray[4];
+        int yIntArray[4];
+        T dx;
+        T dy;
+        cubicSequentialData(xIntArray, yIntArray, dx, dy, xSource, ySource, widthSource, heightSource);
+
+        T temp[4];
+        for (unsigned char i = 0; i < 4; i++)
+        {
+            const auto offset = yIntArray[i]*widthSourcePtr;
+            temp[i] = cubicInterpolate(
+                T(sourcePtr[offset + xIntArray[0]]), T(sourcePtr[offset + xIntArray[1]]),
+                T(sourcePtr[offset + xIntArray[2]]), T(sourcePtr[offset + xIntArray[3]]), dx);
+        }
+        return cubicInterpolate(temp[0], temp[1], temp[2], temp[3], dy);
+    }
+
+    template <typename T>
+    inline __device__ T bicubicInterpolate8Times(
+        const T* const sourcePtr, const T xSource, const T ySource, const int widthSource, const int heightSource,
+        const int threadIdxX, const int threadIdxY)
+    {
+        // Now we only need dx and dy
+        const T dx = xSource - fastTruncateCuda(int(floor(xSource)), 0, widthSource - 1);
+        const T dy = ySource - fastTruncateCuda(int(floor(ySource)), 0, heightSource - 1);
+
+        T temp[4];
+        for (unsigned char i = 0; i < 4; i++)
+        {
+            const auto offset = 5 * (i + (threadIdxY > 3 ? 1 : 0)) + (threadIdxX > 3 ? 1 : 0);
+            temp[i] = cubicInterpolate(
+                sourcePtr[offset], sourcePtr[offset+1], sourcePtr[offset+2],
+                sourcePtr[offset+3], dx);
         }
         return cubicInterpolate(temp[0], temp[1], temp[2], temp[3], dy);
     }
@@ -147,7 +192,8 @@ namespace op
     }
 
     template <typename T>
-    inline __device__ void addColorWeighted(T& colorR, T& colorG, T& colorB, const T* const colorToAdd, const T alphaColorToAdd)
+    inline __device__ void addColorWeighted(
+        T& colorR, T& colorG, T& colorB, const T* const colorToAdd, const T alphaColorToAdd)
     {
         colorR = addWeighted(colorR, colorToAdd[0], alphaColorToAdd);
         colorG = addWeighted(colorG, colorToAdd[1], alphaColorToAdd);
